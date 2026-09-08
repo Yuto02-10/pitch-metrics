@@ -64,6 +64,47 @@ def load_all_data(folder_path="試合データ"):
     df_concat['Count'] = df_concat['Ball'].astype(str) + "B-" + df_concat['Strike'].astype(str) + "S"
     
     return df_concat
+# 危険度スコア（打球結果 × 打球質の詳細重み付け）の計算ロジック
+    def calc_danger_score(row):
+        if pd.isna(row['PitchResult']) or row['PitchResult'] != 'インプレー':
+            return 0.0
+            
+        # 1. 打球結果の重み (Result Weight)
+        res = row.get('HitResult', '')
+        if res == '本塁打':
+            res_w = 4.0
+        elif res == '三塁打':
+            res_w = 3.0
+        elif res == '二塁打':
+            res_w = 2.0
+        elif res in ['単打', 'エラー']:
+            res_w = 1.0
+        else: # アウト・犠打
+            res_w = 0.2  # コンタクト（打たれたこと）に対する最低限の重み
+
+        # 2. 打球質の重み (Type Weight)
+        ht = str(row.get('HitType', ''))
+        catch = str(row.get('Catch', ''))
+        
+        # 内野手リスト
+        infielder = ['投手', '捕手', '一塁手', '二塁手', '三塁手', '遊撃手']
+        
+        if 'ライナー' in ht:
+            type_w = 1.5  # 強打（最も危険）
+        elif 'フライ' in ht or 'ポップ' in ht:
+            if any(pos in catch for pos in infielder):
+                type_w = 0.3  # 内野フライ（危険度：小）
+            else:
+                type_w = 1.1  # 外野フライ（危険度：中〜大）
+        elif 'ゴロ' in ht:
+            type_w = 0.6    # ゴロ（危険度：小〜中）
+        else:
+            type_w = 1.0
+
+        return res_w * type_w
+
+    df_concat['DangerScore'] = df_concat.apply(calc_danger_score, axis=1)
+    df_concat['IsInPlay'] = df_concat['PitchResult'] == 'インプレー'
 
 # データロード
 df_raw = load_all_data()
@@ -343,29 +384,43 @@ with tab2:
 
 
 # =============================================================================
-# TAB 3: コース別ヒートマップ (右・左打者視点)
+# TAB 3: コース別ヒートマップ (期間1ベース)
 # =============================================================================
 with tab3:
     st.subheader("🗺️ コース別ヒートマップ (期間1)")
     
+    # -------------------------------------------------------------------------
+    # コントロールUI (打者打席 / 表示指標 / 球種絞り込み)
+    # -------------------------------------------------------------------------
     col_h1, col_h2, col_h3 = st.columns(3)
     with col_h1:
-        target_batter_lr = st.radio("打者打席（視点切り替え）", ["右打者", "左打者"], key="hm_lr", horizontal=True)
+        target_batter_lr = st.radio("打者打席の選択", ["右打者", "左打者"], key="hm_lr", horizontal=True)
     with col_h2:
-        metric_choice = st.radio("表示指標", ["ストライク奪取率 (%)", "インプレー時危険度 (被安打率 %)"], horizontal=True)
+        metric_choice = st.radio(
+            "表示指標", 
+            ["ストライク奪取率 (%)", "インプレー時危険度 (被安打率 %)", "重み付け危険度スコア (平均)"], 
+            key="hm_metric",
+            horizontal=True
+        )
     with col_h3:
         all_pitch_types = ["すべて"] + list(df_p1['PitchType'].dropna().unique())
         selected_pt_map = st.selectbox("球種絞り込み", all_pitch_types, key="hm_pt")
 
+    # -------------------------------------------------------------------------
+    # データのフィルタリング
+    # -------------------------------------------------------------------------
     lr_key = "右" if target_batter_lr == "右打者" else "左"
     df_hm = df_p1[df_p1['BatterLR'] == lr_key]
     
     if selected_pt_map != "すべて":
         df_hm = df_hm[df_hm['PitchType'] == selected_pt_map]
 
-    # 設定取得 (打者左右に応じたコース名称・位置座標)
+    # コース番号・マッピング設定の取得 (ゾーン番号表示に統一)
     zone_names, pos_mapping, x_axis_labels = get_zone_config()
 
+    # -------------------------------------------------------------------------
+    # 5x3 グリッド行列の生成
+    # -------------------------------------------------------------------------
     grid_matrix = np.full((3, 5), np.nan)
     text_matrix = np.full((3, 5), "", dtype=object)
 
@@ -376,15 +431,25 @@ with tab3:
         if n_loc > 0:
             if metric_choice == "ストライク奪取率 (%)":
                 val = (df_loc['IsStrike'].sum() / n_loc) * 100
-            else: # インプレー時危険度
-                hits = df_loc['IsHit'].sum()
-                val = (hits / n_loc) * 100
+                unit_str = "%"
+            elif metric_choice == "インプレー時危険度 (被安打率 %)":
+                n_inplay = df_loc['IsInPlay'].sum()
+                val = (df_loc['IsHit'].sum() / n_inplay * 100) if n_inplay > 0 else 0.0
+                unit_str = "%"
+            else:  # 重み付け危険度スコア (平均)
+                n_inplay = df_loc['IsInPlay'].sum()
+                # インプレー1球あたりの平均危険度スコア（内野/外野フライ・打球質区分含む）
+                val = (df_loc['DangerScore'].sum() / n_inplay) if n_inplay > 0 else 0.0
+                unit_str = " pt"
                 
-            grid_matrix[r, c] = round(val, 1)
-            text_matrix[r, c] = f"<b>{zone_names[loc]}</b><br>ゾーン{loc}<br><b>{val:.1f}%</b><br>({n_loc}球)"
+            grid_matrix[r, c] = round(val, 2)
+            text_matrix[r, c] = f"<b>{zone_names[loc]}</b><br><b>{val:.2f}{unit_str}</b><br>({n_loc}球)"
         else:
-            text_matrix[r, c] = f"<b>{zone_names[loc]}</b><br>ゾーン{loc}<br>データ無"
+            text_matrix[r, c] = f"<b>{zone_names[loc]}</b><br>データ無"
 
+    # -------------------------------------------------------------------------
+    # ヒートマップ描画 (Plotly)
+    # -------------------------------------------------------------------------
     colorscale = "Blues" if metric_choice == "ストライク奪取率 (%)" else "Reds"
 
     fig_hm = px.imshow(
@@ -399,12 +464,13 @@ with tab3:
     fig_hm.update_traces(
         text=text_matrix,
         texttemplate="%{text}",
-        hovertemplate="コース: %{x}-%{y}<br>値: %{z}%<extra></extra>"
+        hovertemplate="コース: %{x}-%{y}<br>値: %{z}<extra></extra>"
     )
     
     fig_hm.update_layout(
-        title=f"コース別 {metric_choice} （【{target_batter_lr}視点】 / 捕手目線）",
-        height=480
+        title=f"コース別 {metric_choice} （【対 {target_batter_lr}】 / 捕手目線）",
+        height=480,
+        margin=dict(l=20, r=20, t=50, b=30)
     )
 
     st.plotly_chart(fig_hm, use_container_width=True)
