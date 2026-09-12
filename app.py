@@ -416,7 +416,7 @@ with tab3:
     with col_h2:
         metric_choice = st.radio(
             "表示指標", 
-            ["ストライク奪取率 (%)", "インプレー時危険度 (被安打率 %)", "重み付け危険度スコア (平均)"], 
+            ["ストライク奪取率 (%)", "インプレー時危険度 (被安打率 %)", "高度危険度スコア (平均)"], 
             key="hm_metric",
             horizontal=True
         )
@@ -442,7 +442,7 @@ with tab3:
     grid_matrix = np.full((3, 5), np.nan)
     text_matrix = np.full((3, 5), "", dtype=object)
 
-   for loc, (r, c) in pos_mapping.items():
+    for loc, (r, c) in pos_mapping.items():
         df_loc = df_hm[df_hm['PitchLocation'] == loc]
         n_loc = len(df_loc)
         
@@ -454,8 +454,7 @@ with tab3:
                 n_inplay = df_loc['IsInPlay'].sum()
                 val = (df_loc['IsHit'].sum() / n_inplay * 100) if n_inplay > 0 else 0.0
                 unit_str = "%"
-            else:  # 高度危険度スコア (全投球平均)
-                # 1球あたりの平均危険度スコア
+            else:  # 高度危険度スコア (平均)
                 val = df_loc['DangerScore'].mean()
                 unit_str = " pt"
                 
@@ -463,6 +462,7 @@ with tab3:
             text_matrix[r, c] = f"<b>{zone_names[loc]}</b><br><b>{val:.2f}{unit_str}</b><br>({n_loc}球)"
         else:
             text_matrix[r, c] = f"<b>{zone_names[loc]}</b><br>データ無"
+
     # -------------------------------------------------------------------------
     # ヒートマップ描画 (Plotly)
     # -------------------------------------------------------------------------
