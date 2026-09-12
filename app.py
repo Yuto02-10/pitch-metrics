@@ -64,46 +64,64 @@ def load_all_data(folder_path="試合データ"):
     df_concat['Count'] = df_concat['Ball'].astype(str) + "B-" + df_concat['Strike'].astype(str) + "S"
     
     return df_concat
-# 危険度スコア（打球結果 × 打球質の詳細重み付け）の計算ロジック
-    def calc_danger_score(row):
-        if pd.isna(row['PitchResult']) or row['PitchResult'] != 'インプレー':
-            return 0.0
+
+    # 危険度スコア（打者利得 / 被打撃ダメージ）算出ロジック
+    # -------------------------------------------------------------------------
+    def calc_advanced_danger_score(row):
+        korbb = str(row.get('KorBB', ''))
+        pitch_res = str(row.get('PitchResult', ''))
+        
+        # 1. 三振 / 四死球の判定
+        if '三振' in korbb:
+            return -2.5  # 危険度：低 (投手加点 +2.5 の反転)
+        if '四球' in korbb:
+            return 4.0   # 危険度：高
+        if pitch_res == '死球':
+            return 3.0   # 危険度：高
+
+        # 2. 単発投球結果の判定
+        if pitch_res == '空振り': return -1.5
+        if pitch_res == '見逃し': return -1.3
+        if pitch_res == 'ファウル': return -0.7
+        if pitch_res == 'ボール':   return 0.4
+
+        # 3. インプレー時の判定
+        if pitch_res == 'インプレー':
+            hit_type = str(row.get('HitType', ''))
+            hit_result = str(row.get('HitResult', ''))
+            catch_pos = str(row.get('Catch', ''))
+            infielders = ['投手', '捕手', '一塁手', '二塁手', '三塁手', '遊撃手']
+
+            # アウト / データなしの場合 (危険度：低)
+            if hit_result in ['アウト', 'nan', '犠打', '犠飛']:
+                if 'フライ' in hit_type:
+                    return -2.5 if any(pos in catch_pos for pos in infielders) else -1.8
+                elif 'ゴロ' in hit_type:
+                    return -2.0
+                elif 'ライナー' in hit_type:
+                    return -1.5
+                else:
+                    return -0.5
+
+            # 安打・長打・エラーマトリックス (危険度：高)
+            weight_matrix = {
+                ('ゴロ', '単打'): 2.8,     ('ライナー', '単打'): 5.5,   ('フライ', '単打'): 4.7,
+                ('ゴロ', '二塁打'): 6.3,   ('ライナー', '二塁打'): 8.0,  ('フライ', '二塁打'): 9.5,
+                ('ゴロ', '三塁打'): 8.0,   ('ライナー', '三塁打'): 9.5,  ('フライ', '三塁打'): 11.0,
+                ('ゴロ', '本塁打'): 4.5,   ('ライナー', '本塁打'): 20.0, ('フライ', '本塁打'): 16.0,
+                ('ゴロ', 'エラー'): -2.5,  ('ライナー', 'エラー'): -1.5, ('フライ', 'エラー'): -1.0,
+            }
             
-        # 1. 打球結果の重み (Result Weight)
-        res = row.get('HitResult', '')
-        if res == '本塁打':
-            res_w = 4.0
-        elif res == '三塁打':
-            res_w = 3.0
-        elif res == '二塁打':
-            res_w = 2.0
-        elif res in ['単打', 'エラー']:
-            res_w = 1.0
-        else: # アウト・犠打
-            res_w = 0.2  # コンタクト（打たれたこと）に対する最低限の重み
+            # 部分一致用マッピング処理
+            for (ht, hr), val in weight_matrix.items():
+                if ht in hit_type and hr in hit_result:
+                    return val
+                    
+            return 0.0
 
-        # 2. 打球質の重み (Type Weight)
-        ht = str(row.get('HitType', ''))
-        catch = str(row.get('Catch', ''))
-        
-        # 内野手リスト
-        infielder = ['投手', '捕手', '一塁手', '二塁手', '三塁手', '遊撃手']
-        
-        if 'ライナー' in ht:
-            type_w = 1.5  # 強打（最も危険）
-        elif 'フライ' in ht or 'ポップ' in ht:
-            if any(pos in catch for pos in infielder):
-                type_w = 0.3  # 内野フライ（危険度：小）
-            else:
-                type_w = 1.1  # 外野フライ（危険度：中〜大）
-        elif 'ゴロ' in ht:
-            type_w = 0.6    # ゴロ（危険度：小〜中）
-        else:
-            type_w = 1.0
+        return 0.0
 
-        return res_w * type_w
-
-    df_concat['DangerScore'] = df_concat.apply(calc_danger_score, axis=1)
+    df_concat['DangerScore'] = df_concat.apply(calc_advanced_danger_score, axis=1)
     df_concat['IsInPlay'] = df_concat['PitchResult'] == 'インプレー'
 
 # データロード
@@ -424,7 +442,7 @@ with tab3:
     grid_matrix = np.full((3, 5), np.nan)
     text_matrix = np.full((3, 5), "", dtype=object)
 
-    for loc, (r, c) in pos_mapping.items():
+   for loc, (r, c) in pos_mapping.items():
         df_loc = df_hm[df_hm['PitchLocation'] == loc]
         n_loc = len(df_loc)
         
@@ -436,17 +454,15 @@ with tab3:
                 n_inplay = df_loc['IsInPlay'].sum()
                 val = (df_loc['IsHit'].sum() / n_inplay * 100) if n_inplay > 0 else 0.0
                 unit_str = "%"
-            else:  # 重み付け危険度スコア (平均)
-                n_inplay = df_loc['IsInPlay'].sum()
-                # インプレー1球あたりの平均危険度スコア（内野/外野フライ・打球質区分含む）
-                val = (df_loc['DangerScore'].sum() / n_inplay) if n_inplay > 0 else 0.0
+            else:  # 高度危険度スコア (全投球平均)
+                # 1球あたりの平均危険度スコア
+                val = df_loc['DangerScore'].mean()
                 unit_str = " pt"
                 
             grid_matrix[r, c] = round(val, 2)
             text_matrix[r, c] = f"<b>{zone_names[loc]}</b><br><b>{val:.2f}{unit_str}</b><br>({n_loc}球)"
         else:
             text_matrix[r, c] = f"<b>{zone_names[loc]}</b><br>データ無"
-
     # -------------------------------------------------------------------------
     # ヒートマップ描画 (Plotly)
     # -------------------------------------------------------------------------
