@@ -137,9 +137,20 @@ if df_raw is None or df_raw.empty:
 st.sidebar.title("⚙️ 分析コントロール")
 
 pitcher_list = sorted(df_raw['Pitcher'].dropna().unique())
-selected_pitcher = st.sidebar.selectbox("分析対象投手を選択", pitcher_list)
+# selectbox を multiselect に変更し、デフォルトで先頭の投手を選択状態にする
+selected_pitchers = st.sidebar.multiselect(
+    "分析対象投手を選択（複数選択可）", 
+    pitcher_list, 
+    default=[pitcher_list[0]] if pitcher_list else []
+)
 
-df_pitcher = df_raw[df_raw['Pitcher'] == selected_pitcher]
+# 投手が1人も選択されていない場合は処理を停止して警告を出す
+if not selected_pitchers:
+    st.warning("⚠️ サイドバーから少なくとも1人の投手を選択してください。")
+    st.stop()
+
+# isin を使って複数投手のデータを抽出
+df_pitcher = df_raw[df_raw['Pitcher'].isin(selected_pitchers)]
 
 min_date = df_pitcher['Date'].min().date()
 max_date = df_pitcher['Date'].max().date()
@@ -160,7 +171,9 @@ period2_start, period2_end = st.sidebar.date_input(
 df_p1 = df_pitcher[(df_pitcher['Date'].dt.date >= period1_start) & (df_pitcher['Date'].dt.date <= period1_end)]
 df_p2 = df_pitcher[(df_pitcher['Date'].dt.date >= period2_start) & (df_pitcher['Date'].dt.date <= period2_end)]
 
-st.title(f"⚾ 投手分析ダッシュボード：{selected_pitcher} 投手")
+# 選択された投手の名前をカンマ区切りでタイトルに表示
+pitchers_str = " / ".join(selected_pitchers)
+st.title(f"⚾ 投手分析ダッシュボード：{pitchers_str}")
 
 if df_p1.empty:
     st.error("期間1に該当する投球データがありません。サイドバーで期間を変更してください。")
